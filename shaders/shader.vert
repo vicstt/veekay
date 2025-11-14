@@ -15,15 +15,18 @@ layout (binding = 0, std140) uniform SceneUniforms {
 layout (binding = 1, std140) uniform ModelUniforms {
 	mat4 model;
 	vec3 albedo_color;
+	float shininess;
+	vec3 specular_color;
+	float _pad;
 };
 
 void main() {
 	vec4 position = model * vec4(v_position, 1.0f);
 	vec4 normal = model * vec4(v_normal, 0.0f);
 
-	gl_Position = view_projection * position;
+	gl_Position = view_projection * position; 
 
-	f_position = position.xyz;
+	f_position = position.xyz;	
 	f_normal = normal.xyz;
 	f_uv = v_uv;
 }

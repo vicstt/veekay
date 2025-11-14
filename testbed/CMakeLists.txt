@@ -21,7 +21,7 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(lodepng)
 
-target_link_libraries(${PROJECT_NAME} veekay Vulkan::Headers)
+target_link_libraries(${PROJECT_NAME} veekay Vulkan::Vulkan)
 
 target_sources(${PROJECT_NAME} PRIVATE
 	${lodepng_SOURCE_DIR}/lodepng.cpp
@@ -51,12 +51,12 @@ if(GLSLC_FOUND)
 		list(APPEND _SHADER_BINARIES ${SHADER_BINARY_PATH})
 	endmacro()
 
-	# To compile shader file, use compile_shader function with a file name
-	# of a shader inside shaders directory. See example below
-
+	# Compile vertex and fragment shaders
 	compile_shader(shader.vert)
 	compile_shader(shader.frag)
 
 	add_custom_target(shaders DEPENDS ${_SHADER_BINARIES})
 	add_dependencies(${PROJECT_NAME} shaders)
+else()
+	message(WARNING "glslc not found - shaders will not be compiled automatically")
 endif()
