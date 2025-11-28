@@ -37,7 +37,7 @@ namespace {
 		float _pad0;
 	};
 
-	struct SpotLightStruct { 
+	struct SpotLightStruct {
 		veekay::vec3 position;
 		float _pad0;
 		veekay::vec3 direction;
@@ -60,13 +60,13 @@ namespace {
 		veekay::vec3 directional_color;
 		float _p3; // padding
 
-		SpotLightStruct spot_lights[10]; 
-		uint32_t spot_light_count;       
+		SpotLightStruct spot_lights[10];
+		uint32_t spot_light_count;
 		float _pad1;
-		float _pad2; 
-		float _pad3; 
+		float _pad2;
+		float _pad3;
 
-		PointLight point_lights[10]; 
+		PointLight point_lights[10];
 		uint32_t point_light_count;
 		float _pad4; // padding
 		float _pad5; // padding
@@ -865,7 +865,7 @@ namespace {
 
 		SceneUniforms scene_data;
 		scene_data.view_projection = camera.view_projection(aspect);
-		scene_data.view_position = camera.position;
+		scene_data.view_position = camera.rotation;
 		scene_data.ambient_light_intensity = ambient_light.color;
 		scene_data.sun_light_direction = directional_light.direction;
 		scene_data.sun_light_color = directional_light.color;
@@ -889,7 +889,7 @@ namespace {
 		}
 
 		LightData light_data;
-		light_data.camera_position = camera.position;
+		light_data.camera_position = camera.rotation;
 		light_data._p0 = 0.0f; // padding
 		light_data.ambient_color = ambient_light.color;
 		light_data._p1 = 0.0f; // padding
@@ -910,10 +910,17 @@ namespace {
 		light_data._pad2 = 0.0f; // padding
 		light_data._pad3 = 0.0f; // padding
 
+
 		for (size_t i = 0; i < point_lights.size() && i < 10; ++i) {
-			light_data.point_lights[i] = point_lights[i];
+			light_data.point_lights[i].position = point_lights[i].position;
+			light_data.point_lights[i].color = point_lights[i].color;
+			light_data.point_lights[i].intensity = point_lights[i].intensity;
 		}
+
 		light_data.point_light_count = static_cast<uint32_t>(point_lights.size());
+		light_data._pad4 = 0.0f; // padding
+		light_data._pad5 = 0.0f; // padding
+		light_data._pad6 = 0.0f; // padding
 
 		memcpy(light_data_buffer->mapped_region, &light_data, sizeof(LightData));
 	}
