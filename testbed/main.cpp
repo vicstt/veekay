@@ -5,6 +5,7 @@
 #include <iostream>
 #include <fstream>
 #include <algorithm>
+#include <cmath>
 #define _USE_MATH_DEFINES
 #include <cmath>
 
@@ -90,19 +91,12 @@ namespace {
 		float _pad6;
 	};
 
-	struct Material {
-		veekay::vec3 albedo = { 1.0f, 1.0f, 1.0f };
-		float _pad0;
-		veekay::vec3 specular = { 1.0f, 1.0f, 1.0f };
-		float shininess = 32.0f;
-	};
-
 	struct ModelUniforms {
 		veekay::mat4 model;
-		veekay::vec3 albedo_color;
-		float _pad0;
-		veekay::vec3 specular_color;
-		float shininess;
+		// veekay::vec3 albedo_color;
+		// float _pad0;
+		// veekay::vec3 specular_color;
+		// float shininess;
 	};
 
 	struct Mesh {
@@ -120,10 +114,18 @@ namespace {
 		veekay::mat4 matrix() const;
 	};
 
+	struct Material {
+		veekay::graphics::Texture* texture_diffuse;   
+		veekay::graphics::Texture* texture_specular;  
+		veekay::graphics::Texture* texture_emissive;  
+		VkSampler sampler; 
+		VkDescriptorSet descriptor_set; 
+	};
+
 	struct Model {
 		Mesh mesh;
 		Transform transform;
-		Material material;
+		Material* material; 
 	};
 
 	struct Camera {
@@ -184,9 +186,9 @@ namespace {
 		VkShaderModule fragment_shader_module;
 
 		VkDescriptorPool descriptor_pool;
-		VkDescriptorSetLayout descriptor_set_layout;
+		VkDescriptorSetLayout descriptor_set_layout; 
+		VkDescriptorSetLayout material_set_layout;
 		VkDescriptorSet descriptor_set;
-
 		VkPipelineLayout pipeline_layout;
 		VkPipeline pipeline;
 
@@ -197,11 +199,11 @@ namespace {
 		Mesh plane_mesh;
 		Mesh cube_mesh;
 
-		veekay::graphics::Texture* missing_texture;
-		VkSampler missing_texture_sampler;
-
-		veekay::graphics::Texture* texture;
-		VkSampler texture_sampler;
+		Material* missing_material; 
+		Material* first_material; 
+		Material* second_material; 
+		Material* third_material;
+		Material* floor_material; 
 
 		uint32_t min_uniform_buffer_offset_alignment;
 		uint32_t aligned_model_uniforms_size;
@@ -213,28 +215,25 @@ namespace {
 
 	veekay::mat4 Transform::matrix() const {
 		// TODO: Scaling and rotation
-
 		auto t = veekay::mat4::translation(position);
 		auto s = veekay::mat4::scaling(scale);
 		auto rx = veekay::mat4::rotation({ 1,0,0 }, toRadians(rotation.x));
 		auto ry = veekay::mat4::rotation({ 0,1,0 }, toRadians(rotation.y));
 		auto rz = veekay::mat4::rotation({ 0,0,1 }, toRadians(rotation.z));
-		return t * rz * ry * rx * s;
+		return t * rz * ry * rx * s; 
 	}
 
 	veekay::mat4 Camera::view() const {
 		// TODO: Rotation
-
 		auto t = veekay::mat4::translation(-position);
 		auto rx = veekay::mat4::rotation({ 1,0,0 }, toRadians(-rotation.x));
 		auto ry = veekay::mat4::rotation({ 0,1,0 }, toRadians(-rotation.y));
-		auto rz = veekay::mat4::rotation({ 0,0,1 }, toRadians(-rotation.z));
-		return rz * ry * rx * t;
+		auto rz = veekay::mat4::rotation({ 0,0,1 }, toRadians(-rotation.z)); 
+		return rz * ry * rx * t; 
 	}
 
 	veekay::mat4 Camera::view_projection(float aspect_ratio) const {
 		auto projection = veekay::mat4::projection(fov, aspect_ratio, near_plane, far_plane);
-
 		return view() * projection;
 	}
 
@@ -261,6 +260,110 @@ namespace {
 
 		return result;
 	}
+
+	auto createMaterial = [&](veekay::graphics::Texture* tex_diffuse, veekay::graphics::Texture* tex_specular, veekay::graphics::Texture* tex_emissive, VkFilter filter,
+		VkSamplerAddressMode address_mode) -> Material* {
+			Material* mat = new Material();
+			mat->texture_diffuse = tex_diffuse;
+			mat->texture_specular = tex_specular;
+			mat->texture_emissive = tex_emissive;
+			mat->sampler = VK_NULL_HANDLE;
+			mat->descriptor_set = VK_NULL_HANDLE;
+
+			VkDevice& device = veekay::app.vk_device;
+
+			VkSamplerCreateInfo sampler_info{
+				.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+				.pNext = nullptr,
+				.flags = 0,
+				.magFilter = filter, // Фильтр при увеличении
+				.minFilter = filter, // Фильтр при уменьшении
+				.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR, // Линейная интерполяция между mip-уровнями
+				.addressModeU = address_mode, // Режим адресации по U
+				.addressModeV = address_mode, // Режим адресации по V
+				.addressModeW = address_mode,
+				.mipLodBias = 0.0f,
+				.anisotropyEnable = VK_TRUE, // Анизотропная фильтрация
+				.maxAnisotropy = 16.0f, // Макс. уровень анизотропии
+				.compareEnable = VK_FALSE,
+				.compareOp = VK_COMPARE_OP_ALWAYS,
+				.minLod = 0.0f,
+				.maxLod = VK_LOD_CLAMP_NONE, // Использовать все mip-уровни
+				.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+				.unnormalizedCoordinates = VK_FALSE,
+			};
+
+			if (vkCreateSampler(device, &sampler_info, nullptr, &mat->sampler) != VK_SUCCESS) {
+				std::cerr << "Failed to create Vulkan texture sampler\n";
+				veekay::app.running = false;
+				delete mat; 
+				return nullptr;
+			}
+
+			// Выделение descriptor set для этого материала из пула
+			VkDescriptorSetAllocateInfo alloc_info{
+				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+				.descriptorPool = descriptor_pool,
+				.descriptorSetCount = 1,
+				.pSetLayouts = &material_set_layout,
+			};
+			if (vkAllocateDescriptorSets(device, &alloc_info, &mat->descriptor_set) != VK_SUCCESS) {
+				std::cerr << "Failed to allocate material descriptor set\n";
+				vkDestroySampler(device, mat->sampler, nullptr);
+				delete mat;
+				return nullptr;
+			}
+
+			// Запись в descriptor set: binding 0, 1, 2 связываются с текстурами и сэмплером
+			VkDescriptorImageInfo image_info_diffuse{
+				.sampler = mat->sampler,
+				.imageView = mat->texture_diffuse->view,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+			VkDescriptorImageInfo image_info_specular{
+				.sampler = mat->sampler,
+				.imageView = mat->texture_specular->view,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+			VkDescriptorImageInfo image_info_emissive{
+				.sampler = mat->sampler,
+				.imageView = mat->texture_emissive->view,
+				.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			};
+			VkWriteDescriptorSet write_infos[3] = {
+				VkWriteDescriptorSet{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = mat->descriptor_set,
+					.dstBinding = 0, // layout(set=1, binding=0) в шейдере (diffuse)
+					.dstArrayElement = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &image_info_diffuse,
+				},
+				VkWriteDescriptorSet{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = mat->descriptor_set,
+					.dstBinding = 1, // layout(set=1, binding=1) в шейдере (specular)
+					.dstArrayElement = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &image_info_specular,
+				},
+				VkWriteDescriptorSet{
+					.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+					.dstSet = mat->descriptor_set,
+					.dstBinding = 2, // layout(set=1, binding=2) в шейдере (emissive)
+					.dstArrayElement = 0,
+					.descriptorCount = 1,
+					.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+					.pImageInfo = &image_info_emissive,
+				}
+			};
+			vkUpdateDescriptorSets(device, 3, write_infos, 0, nullptr);
+
+			return mat;
+		};
+
 
 	void initialize(VkCommandBuffer cmd) {
 		VkDevice& device = veekay::app.vk_device;
@@ -427,17 +530,17 @@ namespace {
 					},
 					{
 						.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-						.descriptorCount = 8,
+						.descriptorCount = 48,
 					},
 					{
 						.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-						.descriptorCount = 8,
+						.descriptorCount = 8, 
 					}
 				};
 
 				VkDescriptorPoolCreateInfo info{
 					.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-					.maxSets = 1,
+					.maxSets = 17,
 					.poolSizeCount = sizeof(pools) / sizeof(pools[0]),
 					.pPoolSizes = pools,
 				};
@@ -485,6 +588,41 @@ namespace {
 			}
 
 			{
+				VkDescriptorSetLayoutBinding bindings[3] = {
+					VkDescriptorSetLayoutBinding{
+						.binding = 0, // diffuse
+						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						.descriptorCount = 1,
+						.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, 
+					},
+					VkDescriptorSetLayoutBinding{
+						.binding = 1, // specular
+						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						.descriptorCount = 1,
+						.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+					},
+					VkDescriptorSetLayoutBinding{
+						.binding = 2, // emissive
+						.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+						.descriptorCount = 1,
+						.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+					}
+				};
+
+				VkDescriptorSetLayoutCreateInfo info{
+				   .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+				   .bindingCount = 3,
+				   .pBindings = bindings,
+				};
+
+				if (vkCreateDescriptorSetLayout(device, &info, nullptr, &material_set_layout) != VK_SUCCESS) {
+					std::cerr << "Failed to create Vulkan material descriptor set layout\n";
+					veekay::app.running = false;
+					return;
+				}
+			}
+
+			{
 				VkDescriptorSetAllocateInfo info{
 					.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 					.descriptorPool = descriptor_pool,
@@ -499,12 +637,15 @@ namespace {
 				}
 			}
 
+			VkDescriptorSetLayout set_layouts[] = {
+				descriptor_set_layout,
+				material_set_layout,
+			};
+
 			VkPipelineLayoutCreateInfo layout_info{
 				.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-				.setLayoutCount = 1,
-				.pSetLayouts = &descriptor_set_layout,
-				.pushConstantRangeCount = 0,
-				.pPushConstantRanges = nullptr,
+				.setLayoutCount = 2, // Два набора дескрипторов
+				.pSetLayouts = set_layouts,
 			};
 
 			// NOTE: Create pipeline layout
@@ -562,27 +703,119 @@ namespace {
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
 
-		// NOTE: This texture and sampler is used when texture could not be loaded
 		{
-			VkSamplerCreateInfo info{
-				.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-				.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-			};
+			veekay::vec4 white = { 0.0f, 0.0f, 0.0f, 0.0f };
+			auto* tex = new veekay::graphics::Texture(
+				cmd, 1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, &white);
 
-			if (vkCreateSampler(device, &info, nullptr, &missing_texture_sampler) != VK_SUCCESS) {
-				std::cerr << "Failed to create Vulkan texture sampler\n";
-				veekay::app.running = false;
-				return;
+			missing_material = createMaterial(tex, tex, tex, VK_FILTER_NEAREST, 
+				VK_SAMPLER_ADDRESS_MODE_REPEAT);
+		}
+
+		{
+			std::vector<unsigned char> image_data_d, image_data_s, image_data_e;
+			unsigned width_d, height_d, width_s, height_s, width_e, height_e;
+			unsigned error_d = lodepng::decode(image_data_d, width_d, height_d, "./assets/wood.png");
+			unsigned error_s = lodepng::decode(image_data_s, width_s, height_s, "./assets/star.png"); 
+			unsigned error_e = lodepng::decode(image_data_e, width_e, height_e, "./assets/emissive.png"); 
+
+			if (error_d) {
+				std::cerr << "Failed to load first diffuse texture. Using fallback.\n";
+				first_material = missing_material;
 			}
+			else { 
+				veekay::graphics::Texture* tex_d = new veekay::graphics::Texture(cmd, width_d, height_d, VK_FORMAT_B8G8R8A8_UNORM, image_data_d.data());
 
-			uint32_t pixels[] = {
-				0xff000000, 0xffff00ff,
-				0xffff00ff, 0xff000000,
-			};
+				veekay::graphics::Texture* tex_s;
+				if (error_s) { 
+					std::cerr << "Failed to load first specular texture. Using fallback (checkerboard).\n";
+					tex_s = missing_material->texture_specular; 
+				}
+				else { 
+					tex_s = new veekay::graphics::Texture(cmd, width_s, height_s, VK_FORMAT_B8G8R8A8_UNORM, image_data_s.data()); 
+				}
 
-			missing_texture = new veekay::graphics::Texture(cmd, 2, 2,
-				VK_FORMAT_B8G8R8A8_UNORM,
-				pixels);
+				veekay::graphics::Texture* tex_e;
+				if (error_e) { 
+					std::cerr << "Failed to load first emissive texture. Using fallback (checkerboard).\n";
+					tex_e = missing_material->texture_emissive; 
+				}
+				else { 
+					tex_e = new veekay::graphics::Texture(cmd, width_e, height_e, VK_FORMAT_B8G8R8A8_UNORM, image_data_e.data()); 
+				}
+
+				first_material = createMaterial(tex_d, tex_s, tex_e, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+			}
+		}
+
+		{
+			std::vector<unsigned char> image_data_d, image_data_s, image_data_e;
+			unsigned width_d, height_d, width_s, height_s, width_e, height_e;
+
+			unsigned error_d = lodepng::decode(image_data_d, width_d, height_d, "./assets/stone.png");
+			if (error_d) {
+				std::cerr << "Failed to load floor texture(s). Using fallback.\n";
+				floor_material = missing_material; 
+			}
+			else {
+				veekay::graphics::Texture* tex_d = new veekay::graphics::Texture(cmd, width_d, height_d, VK_FORMAT_B8G8R8A8_UNORM, image_data_d.data()); 
+				veekay::graphics::Texture* tex_s = missing_material->texture_specular; 
+				veekay::graphics::Texture* tex_e = missing_material->texture_emissive; 
+
+				floor_material = createMaterial(tex_d, tex_s, tex_e, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT);
+			}
+		}
+
+		{
+			std::vector<unsigned char> image_data_d, image_data_s, image_data_e;
+			unsigned width_d, height_d, width_s, height_s, width_e, height_e;
+
+			unsigned error_d = lodepng::decode(image_data_d, width_d, height_d, "./assets/bow.png");
+			unsigned error_s = lodepng::decode(image_data_s, width_s, height_s, "./assets/star.png");
+			if (error_d) {
+				std::cerr << "Failed to load second texture(s). Using fallback.\n";
+				second_material = missing_material; 
+			}
+			else {
+				veekay::graphics::Texture* tex_d = new veekay::graphics::Texture(cmd, width_d, height_d, VK_FORMAT_B8G8R8A8_UNORM, image_data_d.data());
+				veekay::graphics::Texture* tex_s;
+				if (error_s) {
+					std::cerr << "Failed to load first specular texture. Using fallback (checkerboard).\n";
+					tex_s = missing_material->texture_specular;
+				}
+				else {
+					tex_s = new veekay::graphics::Texture(cmd, width_s, height_s, VK_FORMAT_B8G8R8A8_UNORM, image_data_s.data());
+				}
+				veekay::graphics::Texture* tex_e = missing_material->texture_emissive; 
+
+				second_material = createMaterial(tex_d, tex_s, tex_e, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+			}
+		}
+
+		{
+			std::vector<unsigned char> image_data_d, image_data_s, image_data_e;
+			unsigned width_d, height_d, width_s, height_s, width_e, height_e;
+			unsigned error_d = lodepng::decode(image_data_d, width_d, height_d, "./assets/lenna.png"); 
+			unsigned error_s = lodepng::decode(image_data_s, width_s, height_s, "./assets/star.png");
+
+			if (error_d) {
+				std::cerr << "Failed to load third texture(s). Using fallback.\n";
+				third_material = missing_material;
+			}
+			else {
+				veekay::graphics::Texture* tex_d = new veekay::graphics::Texture(cmd, width_d, height_d, VK_FORMAT_B8G8R8A8_UNORM, image_data_d.data());
+				veekay::graphics::Texture* tex_s;
+				if (error_s) {
+					std::cerr << "Failed to load first specular texture. Using fallback (checkerboard).\n";
+					tex_s = missing_material->texture_specular;
+				}
+				else {
+					tex_s = new veekay::graphics::Texture(cmd, width_s, height_s, VK_FORMAT_B8G8R8A8_UNORM, image_data_s.data());
+				}
+				veekay::graphics::Texture* tex_e = missing_material->texture_emissive;
+
+				third_material = createMaterial(tex_d, tex_s, tex_e, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+			}
 		}
 
 
@@ -596,7 +829,7 @@ namespace {
 				{
 					.buffer = model_uniforms_buffer->buffer,
 					.offset = 0,
-					.range = aligned_model_uniforms_size,
+					.range = aligned_model_uniforms_size, 
 				},
 				{
 					.buffer = light_data_buffer->buffer,
@@ -648,9 +881,9 @@ namespace {
 			// (v3)------(v2)
 			std::vector<Vertex> vertices = {
 				{{-5.0f, 0.0f, 5.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
-				{{5.0f, 0.0f, 5.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
-				{{5.0f, 0.0f, -5.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
-				{{-5.0f, 0.0f, -5.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
+				{{5.0f, 0.0f, 5.0f}, {0.0f, -1.0f, 0.0f}, {10.0f, 0.0f}}, 
+				{{5.0f, 0.0f, -5.0f}, {0.0f, -1.0f, 0.0f}, {10.0f, 10.0f}},
+				{{-5.0f, 0.0f, -5.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 10.0f}},
 			};
 
 			std::vector<uint32_t> indices = {
@@ -725,42 +958,42 @@ namespace {
 		// NOTE: Add models to scene
 		models.emplace_back(Model{
 			.mesh = plane_mesh,
-			.transform = {},
-			.material = { {0.8f,0.8f,0.8f}, 0, {0.5f,0.5f,0.5f}, 16.0f }
+			.transform = Transform{},
+			.material = floor_material, 
 			});
 
 		models.emplace_back(Model{
 			.mesh = cube_mesh,
-			.transform = {.position = {-2.0f, -0.5f, -1.5f} },
-			.material = { {1.0f,0.0f,0.0f}, 0, {1.0f,1.0f,1.0f}, 64.0f }
+			.transform = Transform{.position = {-2.0f, -0.5f, -1.5f}, },
+			.material = first_material, 
 			});
 
 		models.emplace_back(Model{
 			.mesh = cube_mesh,
-			.transform = {.position = {1.5f, -0.5f, -0.5f} },
-			.material = { {0.0f,1.0f,0.0f}, 0, {1.0f,1.0f,1.0f}, 64.0f }
+			.transform = Transform{.position = {1.5f, -0.5f, -0.5f}, },
+			.material = second_material,
 			});
 
 		models.emplace_back(Model{
 			.mesh = cube_mesh,
-			.transform = {.position = {0.0f, -0.5f, 1.0f} },
-			.material = { {0.0f,0.0f,1.0f}, 0, {1.0f,1.0f,1.0f}, 64.0f }
+			.transform = Transform{.position = {0.0f, -0.5f, 1.0f}, },
+			.material = third_material, 
 			});
 
 		point_lights.push_back({
 			.position = { -2.0f, 1.0f, -1.5f },
-			.intensity = 10.0f,
-			.color = { 1.0f, 0.0f, 0.0f }
+			.intensity = 5.0f, 
+			.color = { 0.8f, 0.6f, 0.6f } 
 			});
 		point_lights.push_back({
 			.position = { 1.5f, 1.0f, -0.5f },
-			.intensity = 10.0f,
-			.color = { 0.0f, 1.0f, 0.0f }
+			.intensity = 5.0f, 
+			.color = { 0.6f, 0.8f, 0.6f } 
 			});
 		point_lights.push_back({
 			.position = { 0.0f, 1.0f, 1.0f },
-			.intensity = 10.0f,
-			.color = { 0.0f, 0.0f, 1.0f }
+			.intensity = 5.0f, 
+			.color = { 0.6f, 0.6f, 0.8f } 
 			});
 
 		spot_lights.emplace_back(SpotLight{
@@ -776,24 +1009,85 @@ namespace {
 	void shutdown() {
 		VkDevice& device = veekay::app.vk_device;
 
-		delete light_data_buffer;
+		models.clear();
+
 		delete cube_mesh.index_buffer;
 		delete cube_mesh.vertex_buffer;
 		delete plane_mesh.index_buffer;
 		delete plane_mesh.vertex_buffer;
+
+		delete light_data_buffer;
 		delete model_uniforms_buffer;
 		delete scene_uniforms_buffer;
 
-		vkDestroySampler(device, missing_texture_sampler, nullptr);
-		delete missing_texture;
+		std::vector<veekay::graphics::Texture*> unique_textures;
+		auto isTextureUnique = [&](veekay::graphics::Texture* tex) {
+			if (!tex) return false;
+			return std::find(unique_textures.begin(), unique_textures.end(), tex) == unique_textures.end();
+			};
+
+		std::vector<Material*> all_materials;
+		all_materials.push_back(first_material);
+		all_materials.push_back(second_material);
+		all_materials.push_back(third_material);
+		all_materials.push_back(floor_material);
+		all_materials.push_back(missing_material);
+
+		for (auto* mat : all_materials) {
+			if (!mat) continue;
+			if (mat->texture_diffuse && isTextureUnique(mat->texture_diffuse)) {
+				unique_textures.push_back(mat->texture_diffuse);
+			}
+			if (mat->texture_specular && isTextureUnique(mat->texture_specular)) {
+				unique_textures.push_back(mat->texture_specular);
+			}
+			if (mat->texture_emissive && isTextureUnique(mat->texture_emissive)) {
+				unique_textures.push_back(mat->texture_emissive);
+			}
+		}
+
+		for (auto* mat : all_materials) {
+			if (!mat) continue;
+
+			if (mat->sampler != VK_NULL_HANDLE) {
+				vkDestroySampler(device, mat->sampler, nullptr);
+				mat->sampler = VK_NULL_HANDLE;
+			}
+
+			// Don't delete textures here, they'll be deleted separately
+			delete mat; // Delete the Material struct itself
+		}
+
+		first_material = nullptr;
+		second_material = nullptr;
+		third_material = nullptr;
+		floor_material = nullptr;
+		missing_material = nullptr;
+
+		for (auto* tex : unique_textures) {
+			delete tex;
+		}
+
+		vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
+		descriptor_pool = VK_NULL_HANDLE;
+
+		vkDestroyDescriptorSetLayout(device, material_set_layout, nullptr);
+		material_set_layout = VK_NULL_HANDLE;
 
 		vkDestroyDescriptorSetLayout(device, descriptor_set_layout, nullptr);
-		vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
+		descriptor_set_layout = VK_NULL_HANDLE;
 
 		vkDestroyPipeline(device, pipeline, nullptr);
+		pipeline = VK_NULL_HANDLE;
+
 		vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
+		pipeline_layout = VK_NULL_HANDLE;
+
 		vkDestroyShaderModule(device, fragment_shader_module, nullptr);
+		fragment_shader_module = VK_NULL_HANDLE;
+
 		vkDestroyShaderModule(device, vertex_shader_module, nullptr);
+		vertex_shader_module = VK_NULL_HANDLE;
 	}
 
 	void update(double time) {
@@ -817,7 +1111,7 @@ namespace {
 			ImGui::Text("%s", label);
 			ImGui::SliderFloat3(("Pos##Spot" + std::to_string(i)).c_str(), &spot_lights[i].position.x, -10.0f, 10.0f);
 			ImGui::SliderFloat3(("Dir##Spot" + std::to_string(i)).c_str(), &spot_lights[i].direction.x, -1.0f, 1.0f);
-			spot_lights[i].direction = veekay::vec3::normalized(spot_lights[i].direction); // Нормализуем направление
+			spot_lights[i].direction = veekay::vec3::normalized(spot_lights[i].direction);
 			ImGui::ColorEdit3(("Color##Spot" + std::to_string(i)).c_str(), &spot_lights[i].color.x);
 			ImGui::SliderFloat(("Inner CutOff##Spot" + std::to_string(i)).c_str(), &spot_lights[i].inner_cutOff, 0.0f, 45.0f);
 			ImGui::SliderFloat(("Outer CutOff##Spot" + std::to_string(i)).c_str(), &spot_lights[i].outer_cutOff, 0.0f, 45.0f);
@@ -865,7 +1159,7 @@ namespace {
 
 		SceneUniforms scene_data;
 		scene_data.view_projection = camera.view_projection(aspect);
-		scene_data.view_position = camera.rotation;
+		scene_data.view_position = camera.rotation; 
 		scene_data.ambient_light_intensity = ambient_light.color;
 		scene_data.sun_light_direction = directional_light.direction;
 		scene_data.sun_light_color = directional_light.color;
@@ -877,9 +1171,9 @@ namespace {
 		for (size_t i = 0, n = models.size(); i < n; ++i) {
 			ModelUniforms& uniforms = model_uniforms_data[i];
 			uniforms.model = models[i].transform.matrix();
-			uniforms.albedo_color = models[i].material.albedo;
-			uniforms.specular_color = models[i].material.specular;
-			uniforms.shininess = models[i].material.shininess;
+			// uniforms.albedo_color = models[i].albedo_color; 
+			// uniforms.specular_color = models[i].material->specular; 
+			// uniforms.shininess = models[i].material->shininess; 
 		}
 
 		uint8_t* buffer_ptr = static_cast<uint8_t*>(model_uniforms_buffer->mapped_region);
@@ -889,7 +1183,7 @@ namespace {
 		}
 
 		LightData light_data;
-		light_data.camera_position = camera.rotation;
+		light_data.camera_position = camera.rotation; 
 		light_data._p0 = 0.0f; // padding
 		light_data.ambient_color = ambient_light.color;
 		light_data._p1 = 0.0f; // padding
@@ -928,55 +1222,69 @@ namespace {
 	void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
 		vkResetCommandBuffer(cmd, 0);
 
-		VkCommandBufferBeginInfo begin_info{
-			.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-			.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-		};
-		vkBeginCommandBuffer(cmd, &begin_info);
-
-		VkClearValue clear_color{ .color = {{0.1f, 0.1f, 0.1f, 1.0f}} };
-		VkClearValue clear_depth{ .depthStencil = {1.0f, 0} };
-		VkClearValue clear_values[] = { clear_color, clear_depth };
-
-		VkRenderPassBeginInfo rp_info{
-			.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-			.renderPass = veekay::app.vk_render_pass,
-			.framebuffer = framebuffer,
-			.renderArea = {.extent = {veekay::app.window_width, veekay::app.window_height} },
-			.clearValueCount = 2,
-			.pClearValues = clear_values,
-		};
-
-		vkCmdBeginRenderPass(cmd, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
-
-		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-		VkDeviceSize zero_offset = 0;
-
-		VkBuffer current_vertex_buffer = VK_NULL_HANDLE;
-		VkBuffer current_index_buffer = VK_NULL_HANDLE;
-
-		for (size_t i = 0, n = models.size(); i < n; ++i) {
-			const Model& model = models[i];
-			const Mesh& mesh = model.mesh;
-
-			if (current_vertex_buffer != mesh.vertex_buffer->buffer) {
-				current_vertex_buffer = mesh.vertex_buffer->buffer;
-				vkCmdBindVertexBuffers(cmd, 0, 1, &current_vertex_buffer, &zero_offset);
-			}
-
-			if (current_index_buffer != mesh.index_buffer->buffer) {
-				current_index_buffer = mesh.index_buffer->buffer;
-				vkCmdBindIndexBuffer(cmd, current_index_buffer, zero_offset, VK_INDEX_TYPE_UINT32);
-			}
-
-			uint32_t dyn_offset = i * aligned_model_uniforms_size;
-
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_set, 1, &dyn_offset);
-
-			vkCmdDrawIndexed(cmd, mesh.indices, 1, 0, 0, 0);
+		{ 
+			VkCommandBufferBeginInfo info{
+				.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+				.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+			};
+			vkBeginCommandBuffer(cmd, &info);
 		}
 
-		vkCmdEndRenderPass(cmd);
+		{ 
+			VkClearValue clear_color{ .color = {{0.1f, 0.1f, 0.1f, 1.0f}} };
+			VkClearValue clear_depth{ .depthStencil = {1.0f, 0} };
+			VkClearValue clear_values[] = { clear_color, clear_depth };
+
+			VkRenderPassBeginInfo info{
+				.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+				.renderPass = veekay::app.vk_render_pass,
+				.framebuffer = framebuffer,
+				.renderArea = {.extent = {veekay::app.window_width, veekay::app.window_height}, },
+				.clearValueCount = 2,
+				.pClearValues = clear_values,
+			};
+
+			vkCmdBeginRenderPass(cmd, &info, VK_SUBPASS_CONTENTS_INLINE);
+
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+			VkBuffer current_vertex_buffer = VK_NULL_HANDLE;
+			VkBuffer current_index_buffer = VK_NULL_HANDLE;
+			VkDescriptorSet current_material_set = VK_NULL_HANDLE;
+
+			for (size_t i = 0, n = models.size(); i < n; ++i) {
+				const Model& model = models[i];
+				const Mesh& mesh = model.mesh;
+
+				if (current_vertex_buffer != mesh.vertex_buffer->buffer) {
+					current_vertex_buffer = mesh.vertex_buffer->buffer;
+					VkDeviceSize zero_offset = 0;
+					vkCmdBindVertexBuffers(cmd, 0, 1, &current_vertex_buffer, &zero_offset);
+				}
+
+				if (current_index_buffer != mesh.index_buffer->buffer) {
+					current_index_buffer = mesh.index_buffer->buffer;
+					vkCmdBindIndexBuffer(cmd, current_index_buffer, 0, VK_INDEX_TYPE_UINT32);
+				}
+
+				uint32_t dyn_offset = i * aligned_model_uniforms_size;
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
+					0, 1, &descriptor_set, 1, &dyn_offset);
+
+				VkDescriptorSet material_set = model.material ? model.material->descriptor_set
+					: missing_material->descriptor_set;
+				if (current_material_set != material_set) {
+					current_material_set = material_set;
+					vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
+						1, 1, &current_material_set, 0, nullptr);
+				}
+
+				vkCmdDrawIndexed(cmd, mesh.indices, 1, 0, 0, 0);
+			}
+
+			vkCmdEndRenderPass(cmd);
+		}
+
 		vkEndCommandBuffer(cmd);
 	}
 
