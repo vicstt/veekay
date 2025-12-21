@@ -233,11 +233,6 @@ namespace veekay {
 
 			float len = length(vector);
 
-
-			if (len < 1e-6) {
-				return { 0.0f, 0.0f, 0.0f };
-			}
-
 			result.x /= len;
 			result.y /= len;
 			result.z /= len;
@@ -405,6 +400,23 @@ namespace veekay {
 			return result;
 		}
 
+		static mat4 orthographic(float left, float right,
+			float bottom, float top,
+			float znear, float zfar) {
+			mat4 result{};
+
+			result[0][0] = 2.0f / (right - left);
+			result[1][1] = 2.0f / (top - bottom);
+			result[2][2] = 1.0f / (zfar - znear);
+
+			result[3][0] = -(right + left) / (right - left);
+			result[3][1] = -(top + bottom) / (top - bottom);
+			result[3][2] = -znear / (zfar - znear);
+			result[3][3] = 1.0f;
+
+			return result;
+		}
+
 		static mat4 transpose(const mat4& matrix) {
 			mat4 result{};
 
@@ -435,4 +447,4 @@ namespace veekay {
 		const vec4& operator[](size_t index) const { return columns[index]; }
 	};
 
-}
+} // namespace veekay
